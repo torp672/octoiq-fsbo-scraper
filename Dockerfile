@@ -1,18 +1,10 @@
-# OctoIQ Cloud FSBO Scraper Dockerfile
+# OctoIQ Cost-Effective FSBO Scraper Dockerfile  
 FROM python:3.9-slim
 
-# Chrome ve dependencies kurulum
+# Install basic dependencies only (no Chrome needed)
 RUN apt-get update && apt-get install -y \
-    wget \
-    gnupg \
-    unzip \
     curl \
-    xvfb \
-    && wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/googlechrome-linux-keyring.gpg \
-    && sh -c 'echo "deb [arch=amd64 signed-by=/usr/share/keyrings/googlechrome-linux-keyring.gpg] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google.list' \
-    && apt-get update \
-    && apt-get install -y google-chrome-stable \
-    && rm -rf /var/lib/apt/lists/
+    && rm -rf /var/lib/apt/lists/*
 
 # Working directory
 WORKDIR /app
@@ -32,6 +24,4 @@ ENV PORT=8080
 ENV PYTHONUNBUFFERED=1
 
 # Run command
-
 CMD exec gunicorn --bind :$PORT --workers 1 --threads 8 --timeout 0 fsbo_scraper:app
-

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-OctoIQ Cloud FSBO Scraper
-Sahibinden.com'dan FSBO ilanlarını otomatik çeker
+OctoIQ Cost-Effective FSBO Scraper
+Sahibinden.com'dan FSBO ilanlarını otomatik çeker - API maliyeti yok
 Cloud Run üzerinde çalışır
 """
 
@@ -10,383 +10,399 @@ import json
 import time
 import random
 import logging
-from datetime import datetime
+import requests
+from datetime import datetime, timedelta
 from flask import Flask, request, jsonify
 from typing import List, Dict, Any
-
-import requests
 from bs4 import BeautifulSoup
 import firebase_admin
 from firebase_admin import credentials, firestore
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from webdriver_manager.chrome import ChromeDriverManager
 
-# Logging setup
+# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Flask app
-app = Flask(__name__)
-
-class FSBOCloudScraper:
+class SmartFSBOScraper:
+    """
+    Cost-effective FSBO scraper with intelligent bot avoidance
+    """
     def __init__(self):
         self.init_firebase()
-        self.db = firestore.client()
-        self.scraped_count = 0
-        self.error_count = 0
+        self.init_sessions()
         
     def init_firebase(self):
-        """Firebase Admin SDK başlatma"""
+        """Firebase bağlantısı"""
         try:
-            # Cloud Run ortamında service account otomatik yüklenir
             if not firebase_admin._apps:
-                # Eğer GOOGLE_APPLICATION_CREDENTIALS yoksa default credentials kullan
-                if os.getenv('GOOGLE_APPLICATION_CREDENTIALS'):
-                    cred = credentials.Certificate(os.getenv('GOOGLE_APPLICATION_CREDENTIALS'))
-                    firebase_admin.initialize_app(cred)
-                else:
-                    # Cloud Run'da default service account
-                    firebase_admin.initialize_app()
-            logger.info("✅ Firebase Admin SDK başlatıldı")
+                cred = credentials.ApplicationDefault()
+                firebase_admin.initialize_app(cred)
+            self.db = firestore.client()
+            logger.info("✅ Firebase connected")
         except Exception as e:
-            logger.error(f"❌ Firebase init hatası: {e}")
-            raise
-
-    def get_chrome_driver(self):
-        """Headless Chrome driver oluştur"""
-        try:
-            chrome_options = Options()
-            # Temel headless ayarları
-            chrome_options.add_argument("--headless=new")
-            chrome_options.add_argument("--no-sandbox")
-            chrome_options.add_argument("--disable-dev-shm-usage")
-            chrome_options.add_argument("--disable-gpu")
-            
-            # Memory ve performance optimizasyonu
-            chrome_options.add_argument("--memory-pressure-off")
-            chrome_options.add_argument("--max_old_space_size=4096")
-            chrome_options.add_argument("--disable-background-timer-throttling")
-            chrome_options.add_argument("--disable-renderer-backgrounding")
-            chrome_options.add_argument("--disable-backgrounding-occluded-windows")
-            
-            # Stability artırıcı
-            chrome_options.add_argument("--disable-extensions")
-            chrome_options.add_argument("--disable-plugins")
-            chrome_options.add_argument("--disable-images")
-            chrome_options.add_argument("--disable-javascript")
-            chrome_options.add_argument("--no-first-run")
-            
-            chrome_options.add_argument("--window-size=1280,720")
-            chrome_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-            
-            # Cloud Run için binary path
-            chrome_options.binary_location = "/usr/bin/google-chrome"
-            
-            driver = webdriver.Chrome(options=chrome_options)
-            driver.set_page_load_timeout(30)
-            logger.info("✅ Chrome driver başlatıldı")
-            return driver
-        except Exception as e:
-            logger.error(f"❌ Chrome driver hatası: {e}")
-            return None
-
-    def scrape_sahibinden_fsbo(self, max_pages: int = 3) -> List[Dict[str, Any]]:
-        """Sahibinden.com'dan FSBO ilanlarını çek"""
-        listings = []
-        driver = None
-        
-        try:
-            driver = self.get_chrome_driver()
-            if not driver:
-                logger.error("Chrome driver oluşturulamadı")
-                return listings
-
-            # Sahibinden.com emlak satılık sayfası
-            base_url = "https://www.sahibinden.com/satilik-daire"
-            
-            for page in range(1, max_pages + 1):
-                try:
-                    url = f"{base_url}?pageno={page}"
-                    logger.info(f"🔍 Sayfa {page} taranıyor: {url}")
-                    
-                    driver.get(url)
-                    time.sleep(random.uniform(2, 4))  # Random delay
-                    
-                    # İlan listesi konteynerini bekle
-                    WebDriverWait(driver, 10).until(
-                        EC.presence_of_element_located((By.CLASS_NAME, "searchResultsItem"))
-                    )
-                    
-                    # Sayfayı parse et
-                    soup = BeautifulSoup(driver.page_source, 'html.parser')
-                    page_listings = self.parse_listings_page(soup, page)
-                    listings.extend(page_listings)
-                    
-                    logger.info(f"✅ Sayfa {page}: {len(page_listings)} ilan bulundu")
-                    
-                    # Rate limiting
-                    time.sleep(random.uniform(3, 6))
-                    
-                except Exception as e:
-                    logger.error(f"❌ Sayfa {page} scraping hatası: {e}")
-                    self.error_count += 1
-                    continue
-                    
-        except Exception as e:
-            logger.error(f"❌ Scraping genel hatası: {e}")
-            
-        finally:
-            if driver:
-                driver.quit()
-                logger.info("🔒 Chrome driver kapatıldı")
-                
-        return listings
-
-    def parse_listings_page(self, soup: BeautifulSoup, page_num: int) -> List[Dict[str, Any]]:
-        """Sayfa HTML'ini parse ederek ilan bilgilerini çıkar"""
-        listings = []
-        
-        try:
-            # İlan konteynerlerini bul
-            listing_items = soup.find_all("tr", {"class": "searchResultsItem"})
-            
-            for item in listing_items:
-                try:
-                    listing_data = self.parse_single_listing(item)
-                    if listing_data and self.is_fsbo_candidate(listing_data):
-                        listing_data['source_page'] = page_num
-                        listing_data['scraped_at'] = datetime.now()
-                        listings.append(listing_data)
-                        self.scraped_count += 1
-                        
-                except Exception as e:
-                    logger.error(f"❌ Tek ilan parse hatası: {e}")
-                    continue
-                    
-        except Exception as e:
-            logger.error(f"❌ Sayfa parse hatası: {e}")
-            
-        return listings
-
-    def parse_single_listing(self, item) -> Dict[str, Any]:
-        """Tek bir ilan elementini parse et"""
-        try:
-            # Başlık ve link
-            title_elem = item.find("a", {"class": "classifiedTitle"})
-            if not title_elem:
-                return None
-                
-            title = title_elem.get_text(strip=True)
-            url = "https://www.sahibinden.com" + title_elem.get('href', '')
-            
-            # Fiyat
-            price_elem = item.find("td", {"class": "searchResultsPriceValue"})
-            price_text = price_elem.get_text(strip=True) if price_elem else "0"
-            price = self.clean_price(price_text)
-            
-            # Lokasyon
-            location_elem = item.find("td", {"class": "searchResultsLocationValue"})
-            location = location_elem.get_text(strip=True) if location_elem else ""
-            
-            # İlan detayları
-            details_elem = item.find("td", {"class": "searchResultsAttributeValue"})
-            details = details_elem.get_text(strip=True) if details_elem else ""
-            
-            # Tarih
-            date_elem = item.find("td", {"class": "searchResultsDateValue"})
-            date_text = date_elem.get_text(strip=True) if date_elem else ""
-            
-            return {
-                'title': title,
-                'price': price,
-                'location': location,
-                'details': details,
-                'date_text': date_text,
-                'url': url,
-                'opportunity_score': self.calculate_opportunity_score(title, price, location)
-            }
-            
-        except Exception as e:
-            logger.error(f"❌ Listing parse hatası: {e}")
-            return None
-
-    def clean_price(self, price_text: str) -> int:
-        """Fiyat metnini temizleyip sayıya çevir"""
-        try:
-            # "₺ 850.000" -> 850000
-            cleaned = price_text.replace('₺', '').replace('.', '').replace(' ', '').replace('TL', '')
-            return int(cleaned) if cleaned.isdigit() else 0
-        except:
-            return 0
-
-    def is_fsbo_candidate(self, listing: Dict[str, Any]) -> bool:
-        """FSBO adayı olup olmadığını kontrol et"""
-        title = listing.get('title', '').lower()
-        
-        # FSBO anahtar kelimeleri
-        fsbo_keywords = [
-            'sahibinden', 'acil', 'takas', 'değişen', 'tahliye', 
-            'ihtiyaçtan', 'krediye uygun', 'acele', 'ivedi'
+            logger.error(f"❌ Firebase error: {e}")
+            self.db = None
+    
+    def init_sessions(self):
+        """Multiple sessions with rotating user agents"""
+        self.sessions = []
+        user_agents = [
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/119.0',
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36'
         ]
         
-        # Emlakçı blacklist
-        agent_keywords = ['emlak', 'gayrimenkul', 'danışman', 'broker', 'ofis']
+        for ua in user_agents:
+            session = requests.Session()
+            session.headers.update({
+                'User-Agent': ua,
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'tr-TR,tr;q=0.9,en;q=0.8',
+                'Accept-Encoding': 'gzip, deflate',
+                'DNT': '1',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1'
+            })
+            self.sessions.append(session)
         
-        # FSBO anahtar kelimesi var mı?
-        has_fsbo_keyword = any(keyword in title for keyword in fsbo_keywords)
+        logger.info(f"✅ {len(self.sessions)} sessions ready")
+    
+    def smart_request(self, url: str, max_retries: int = 3) -> str:
+        """Smart request with retry and rotation"""
+        for attempt in range(max_retries):
+            try:
+                session = random.choice(self.sessions)
+                
+                # Random delay
+                delay = 2 + random.uniform(0.5, 2.5)
+                if attempt > 0:
+                    delay += attempt * 2
+                time.sleep(delay)
+                
+                response = session.get(url, timeout=15)
+                
+                if response.status_code == 200:
+                    content = response.text
+                    
+                    # Bot protection check
+                    bot_indicators = ['bir dakika', 'please wait', 'cloudflare', 'captcha']
+                    if any(indicator in content.lower() for indicator in bot_indicators):
+                        logger.warning(f"🤖 Bot protection detected (attempt {attempt + 1})")
+                        continue
+                    
+                    logger.info("✅ Request successful")
+                    return content
+                
+                logger.warning(f"❌ HTTP {response.status_code} (attempt {attempt + 1})")
+                
+            except Exception as e:
+                logger.error(f"Request failed (attempt {attempt + 1}): {e}")
         
-        # Emlakçı kelimesi var mı?
-        has_agent_keyword = any(keyword in title for keyword in agent_keywords)
-        
-        # Fiyat aralığı kontrolü (çok düşük veya çok yüksek fiyatları filtrele)
-        price = listing.get('price', 0)
-        price_ok = 100000 <= price <= 10000000  # 100K - 10M TL arası
-        
-        return has_fsbo_keyword and not has_agent_keyword and price_ok
-
-    def calculate_opportunity_score(self, title: str, price: int, location: str) -> int:
-        """Fırsat skoru hesapla (1-10)"""
-        score = 5  # Base score
-        
-        title_lower = title.lower()
-        
-        # Acil satış kelimeleri (+2 puan)
-        if any(word in title_lower for word in ['acil', 'acele', 'ivedi']):
-            score += 2
+        return None
+    
+    def parse_listings(self, html: str, source_url: str) -> List[Dict]:
+        """Enhanced listing parser"""
+        try:
+            soup = BeautifulSoup(html, 'html.parser')
+            listings = []
             
-        # Takas/değişim (+1 puan)
-        if any(word in title_lower for word in ['takas', 'değişen']):
-            score += 1
+            # Find listing rows
+            rows = soup.select('tr[data-id]')
+            logger.info(f"📊 Found {len(rows)} potential listings")
             
-        # İhtiyaçtan satış (+2 puan)
-        if any(word in title_lower for word in ['ihtiyaçtan', 'tahliye']):
-            score += 2
+            for row in rows[:20]:  # Process max 20
+                try:
+                    listing = self.extract_listing_data(row)
+                    if listing and listing.get('title'):
+                        listing['fsbo_score'] = self.calculate_fsbo_score(listing)
+                        listing['source_url'] = source_url
+                        listing['scraped_at'] = datetime.now().isoformat()
+                        listings.append(listing)
+                except Exception as e:
+                    logger.warning(f"Parse error: {e}")
+                    continue
             
-        # Lokasyon bonusu
-        location_lower = location.lower()
-        if any(loc in location_lower for loc in ['kadıköy', 'beşiktaş', 'şişli']):
-            score += 1
+            logger.info(f"✅ Parsed {len(listings)} valid listings")
+            return listings
             
-        # Fiyat bonusu (ortalama altı fiyatlar)
-        if 200000 <= price <= 500000:
-            score += 1
-            
-        return min(max(score, 1), 10)  # 1-10 arasında sınırla
-
-    def save_to_firestore(self, listings: List[Dict[str, Any]]) -> int:
-        """İlanları Firestore'a kaydet"""
-        saved_count = 0
+        except Exception as e:
+            logger.error(f"HTML parsing failed: {e}")
+            return []
+    
+    def extract_listing_data(self, row) -> Dict:
+        """Extract data from listing row"""
+        data = {}
         
         try:
-            batch = self.db.batch()
+            # Title and URL
+            title_link = row.select_one('a[title]')
+            if title_link:
+                data['title'] = title_link.get('title', '').strip()
+                href = title_link.get('href', '')
+                if href:
+                    data['url'] = f"https://www.sahibinden.com{href}" if href.startswith('/') else href
+            
+            # Price
+            price_elem = row.select_one('.searchResultsPriceValue')
+            if price_elem:
+                price_text = price_elem.get_text(strip=True)
+                data['price_text'] = price_text
+                data['price'] = self.extract_price(price_text)
+            
+            # Location
+            location_elem = row.select_one('.searchResultsLocationValue')
+            if location_elem:
+                data['location'] = location_elem.get_text(strip=True)
+            
+            # Property details
+            attrs = row.select('.searchResultsAttributeValue')
+            if len(attrs) >= 3:
+                data['rooms'] = attrs[0].get_text(strip=True) if attrs[0] else None
+                data['sqm'] = self.extract_number(attrs[1].get_text(strip=True)) if attrs[1] else None
+                data['age'] = self.extract_number(attrs[2].get_text(strip=True)) if attrs[2] else None
+            
+            # Date
+            date_elem = row.select_one('.searchResultsDateValue')
+            if date_elem:
+                data['posted_date'] = date_elem.get_text(strip=True)
+            
+            return data
+            
+        except Exception as e:
+            logger.error(f"Data extraction failed: {e}")
+            return {}
+    
+    def calculate_fsbo_score(self, listing: Dict) -> int:
+        """Advanced FSBO detection scoring"""
+        score = 0
+        title = listing.get('title', '').lower()
+        location = listing.get('location', '').lower()
+        text = f"{title} {location}"
+        
+        # Strong FSBO indicators
+        strong_keywords = [
+            ('sahibinden', 3), ('sahipten', 3), ('acil', 2), 
+            ('ihtiyaçtan', 3), ('kelepir', 2), ('değişim', 2),
+            ('takas', 2), ('aracısız', 2), ('komisyonsuz', 2)
+        ]
+        
+        # Negative indicators (agents)
+        negative_keywords = [
+            ('emlak', -1), ('gayrimenkul', -1), ('ofis', -1),
+            ('danışman', -1), ('acentesi', -1), ('grup', -1),
+            ('şirket', -1), ('ltd', -1)
+        ]
+        
+        # Apply scoring
+        for keyword, weight in strong_keywords + negative_keywords:
+            if keyword in text:
+                score += weight
+        
+        # Price analysis
+        price = listing.get('price')
+        if price and price % 1000 != 0:  # Non-round prices suggest individuals
+            score += 1
+        
+        # Recent posting
+        posted = listing.get('posted_date', '').lower()
+        if any(recent in posted for recent in ['bugün', 'dün', '1 gün', '2 gün']):
+            score += 1
+        
+        return max(0, min(10, score))
+    
+    def extract_price(self, price_text: str) -> int:
+        """Extract numeric price"""
+        try:
+            import re
+            clean = price_text.replace('TL', '').replace('₺', '').replace('.', '').replace(',', '')
+            numbers = re.findall(r'\d+', clean)
+            return int(''.join(numbers)) if numbers else None
+        except:
+            return None
+    
+    def extract_number(self, text: str) -> int:
+        """Extract first number from text"""
+        try:
+            import re
+            numbers = re.findall(r'\d+', text)
+            return int(numbers[0]) if numbers else None
+        except:
+            return None
+    
+    def save_to_firebase(self, listings: List[Dict], location: str) -> Dict:
+        """Save listings to Firebase"""
+        if not self.db:
+            logger.error("Firebase not available")
+            return {'saved': 0, 'fsbo': 0}
+        
+        try:
+            saved_count = 0
+            fsbo_count = 0
             
             for listing in listings:
-                # Duplicate kontrolü için URL hash
-                doc_id = f"fsbo_{hash(listing['url'])}"
-                doc_ref = self.db.collection('fsbo_listings').document(doc_id)
+                # Generate unique ID
+                import hashlib
+                unique_data = f"{listing.get('title', '')}-{listing.get('location', '')}"
+                doc_id = hashlib.md5(unique_data.encode('utf-8')).hexdigest()[:16]
                 
-                # Firestore format
-                firestore_data = {
-                    'title': listing['title'],
-                    'price': listing['price'],
-                    'location': listing['location'],
-                    'url': listing['url'],
-                    'opportunityScore': listing['opportunity_score'],
-                    'details': listing.get('details', ''),
-                    'dateText': listing.get('date_text', ''),
-                    'sourcePage': listing.get('source_page', 1),
-                    'scrapedAt': listing['scraped_at'],
-                    'isActive': True,
-                    'reason': f"Cloud scraper - Score: {listing['opportunity_score']}"
-                }
+                # Add metadata
+                listing.update({
+                    'found_at': firestore.SERVER_TIMESTAMP,
+                    'source_location': location,
+                    'is_active': True,
+                    'version': 'cost_effective_v2'
+                })
                 
-                batch.set(doc_ref, firestore_data, merge=True)
+                # Save
+                self.db.collection('fsbo_listings').document(doc_id).set(listing, merge=True)
                 saved_count += 1
                 
-                # Batch size limit
-                if saved_count % 100 == 0:
-                    batch.commit()
-                    batch = self.db.batch()
-                    
-            # Son batch'i commit et
-            if saved_count % 100 != 0:
-                batch.commit()
+                if listing.get('fsbo_score', 0) >= 5:
+                    fsbo_count += 1
+            
+            logger.info(f"✅ Saved {saved_count} listings, {fsbo_count} FSBO candidates")
+            return {'saved': saved_count, 'fsbo': fsbo_count}
+            
+        except Exception as e:
+            logger.error(f"Firebase save error: {e}")
+            return {'saved': 0, 'fsbo': 0}
+    
+    def scrape_location(self, city: str, district: str = None) -> Dict:
+        """Scrape specific location"""
+        logger.info(f"🔍 Scraping {city} {district or ''}")
+        
+        # Build URL
+        city_clean = city.lower().replace('i̇', 'i')
+        url = f"https://www.sahibinden.com/satilik-daire/{city_clean}"
+        if district:
+            url += f"-{district.lower()}"
+        url += "?sorting=date_desc"
+        
+        # Make request
+        html = self.smart_request(url)
+        if not html:
+            return {'success': False, 'error': 'Failed to fetch data'}
+        
+        # Parse listings
+        listings = self.parse_listings(html, url)
+        if not listings:
+            return {'success': False, 'error': 'No listings found'}
+        
+        # Save to Firebase
+        location_key = f"{city}_{district}" if district else city
+        save_result = self.save_to_firebase(listings, location_key)
+        
+        # Analyze results
+        fsbo_listings = [l for l in listings if l.get('fsbo_score', 0) >= 5]
+        
+        return {
+            'success': True,
+            'location': f"{city} {district or ''}",
+            'total_listings': len(listings),
+            'fsbo_candidates': len(fsbo_listings),
+            'saved_to_firebase': save_result['saved'],
+            'url': url,
+            'top_fsbo': sorted(fsbo_listings, key=lambda x: x.get('fsbo_score', 0), reverse=True)[:3]
+        }
+    
+    def multi_location_scrape(self) -> Dict:
+        """Scrape multiple high-value locations"""
+        locations = [
+            ('istanbul', 'kadikoy'),
+            ('istanbul', 'atasehir'), 
+            ('istanbul', 'besiktas'),
+            ('istanbul', 'beylikduzu'),
+            ('ankara', 'cankaya')
+        ]
+        
+        results = {
+            'timestamp': datetime.now().isoformat(),
+            'locations': [],
+            'summary': {'total_listings': 0, 'total_fsbo': 0, 'locations_scraped': 0}
+        }
+        
+        for city, district in locations:
+            try:
+                result = self.scrape_location(city, district)
+                results['locations'].append(result)
                 
-            logger.info(f"✅ {saved_count} ilan Firestore'a kaydedildi")
-            
-        except Exception as e:
-            logger.error(f"❌ Firestore kaydetme hatası: {e}")
-            
-        return saved_count
-
-    def run_scraping_job(self, max_pages: int = 3) -> Dict[str, Any]:
-        """Ana scraping job'unu çalıştır"""
-        start_time = datetime.now()
-        logger.info(f"🚀 FSBO Cloud Scraper başlatıldı - {start_time}")
+                if result['success']:
+                    results['summary']['total_listings'] += result['total_listings']
+                    results['summary']['total_fsbo'] += result['fsbo_candidates']
+                    results['summary']['locations_scraped'] += 1
+                
+                # Delay between locations
+                time.sleep(random.uniform(3, 7))
+                
+            except Exception as e:
+                logger.error(f"Location scrape failed: {e}")
+                continue
         
-        try:
-            # Scraping yap
-            listings = self.scrape_sahibinden_fsbo(max_pages)
-            
-            # Firestore'a kaydet
-            saved_count = self.save_to_firestore(listings)
-            
-            end_time = datetime.now()
-            duration = (end_time - start_time).total_seconds()
-            
-            result = {
-                'success': True,
-                'start_time': start_time.isoformat(),
-                'end_time': end_time.isoformat(),
-                'duration_seconds': duration,
-                'total_scraped': self.scraped_count,
-                'total_saved': saved_count,
-                'errors': self.error_count,
-                'pages_processed': max_pages
-            }
-            
-            logger.info(f"✅ Scraping tamamlandı: {result}")
-            return result
-            
-        except Exception as e:
-            logger.error(f"❌ Scraping job hatası: {e}")
-            return {
-                'success': False,
-                'error': str(e),
-                'scraped_count': self.scraped_count,
-                'error_count': self.error_count
-            }
+        return results
 
-# Flask Routes
-@app.route('/', methods=['GET', 'POST'])
-def run_scraper():
-    """Cloud Run endpoint - scraper'ı çalıştır"""
+# Flask App
+app = Flask(__name__)
+scraper = SmartFSBOScraper()
+
+@app.route('/')
+def home():
+    return jsonify({
+        'service': 'OctoIQ Cost-Effective FSBO Scraper',
+        'version': '2.0',
+        'features': [
+            'Smart bot avoidance',
+            'No API costs', 
+            'Enhanced FSBO detection',
+            'Firebase integration',
+            'Multi-location support'
+        ],
+        'status': 'ready',
+        'cost_model': 'infrastructure_only'
+    })
+
+@app.route('/health')
+def health():
+    return jsonify({
+        'status': 'healthy',
+        'timestamp': datetime.now().isoformat(),
+        'firebase': scraper.db is not None,
+        'sessions': len(scraper.sessions),
+        'cost_effective': True
+    })
+
+@app.route('/scrape')
+def scrape_all():
+    """Run multi-location scrape"""
     try:
-        # Query parametrelerini al
-        max_pages = int(request.args.get('pages', 3))
-        
-        logger.info(f"🌐 Cloud Run scraper endpoint çağrıldı - pages: {max_pages}")
-        
-        # Scraper'ı çalıştır
-        scraper = FSBOCloudScraper()
-        result = scraper.run_scraping_job(max_pages)
-        
-        return jsonify(result)
-        
+        results = scraper.multi_location_scrape()
+        return jsonify({
+            'success': True,
+            'results': results,
+            'cost_analysis': {
+                'api_costs': '$0',
+                'monthly_estimate': '$20-50 (Cloud Run only)'
+            }
+        })
     except Exception as e:
-        logger.error(f"❌ Endpoint hatası: {e}")
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'success': False, 'error': str(e)}), 500
 
-@app.route('/health', methods=['GET'])
-def health_check():
-    """Health check endpoint"""
-    return jsonify({'status': 'healthy', 'service': 'fsbo-cloud-scraper'})
+@app.route('/scrape/<city>')
+def scrape_city(city):
+    """Scrape specific city"""
+    try:
+        result = scraper.scrape_location(city)
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/scrape/<city>/<district>')
+def scrape_district(city, district):
+    """Scrape specific city-district"""
+    try:
+        result = scraper.scrape_location(city, district)
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 if __name__ == '__main__':
-    # Local development
     port = int(os.environ.get('PORT', 8080))
-    app.run(host='0.0.0.0', port=port, debug=True)
+    app.run(host='0.0.0.0', port=port)

@@ -5,6 +5,6 @@ google-cloud-firestore==2.16.0
 flask==3.0.0
 gunicorn==21.2.0
 lxml==4.9.3
-selenium==4.15.2
-webdriver-manager==4.0.1
-importlib-metadata==6.8.0
+# Removed Selenium and WebDriver (not needed for cost-effective version)
+# Removed expensive API integrations
+# Cost-effective version uses only requests + beautifulsoup
