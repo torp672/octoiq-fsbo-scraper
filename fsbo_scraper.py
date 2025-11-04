@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-OctoIQ Cost-Effective FSBO Scraper
+OctoIQ CRM Cost-Effective FSBO Scraper
 Sahibinden.com'dan FSBO ilanlarını otomatik çeker - API maliyeti yok
 Cloud Run üzerinde çalışır
 """
