@@ -60,17 +60,34 @@ class FSBOCloudScraper:
         """Headless Chrome driver oluştur"""
         try:
             chrome_options = Options()
-            chrome_options.add_argument("--headless")
+            # Temel headless ayarları
+            chrome_options.add_argument("--headless=new")
             chrome_options.add_argument("--no-sandbox")
             chrome_options.add_argument("--disable-dev-shm-usage")
             chrome_options.add_argument("--disable-gpu")
-            chrome_options.add_argument("--window-size=1920,1080")
-            chrome_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+            
+            # Memory ve performance optimizasyonu
+            chrome_options.add_argument("--memory-pressure-off")
+            chrome_options.add_argument("--max_old_space_size=4096")
+            chrome_options.add_argument("--disable-background-timer-throttling")
+            chrome_options.add_argument("--disable-renderer-backgrounding")
+            chrome_options.add_argument("--disable-backgrounding-occluded-windows")
+            
+            # Stability artırıcı
+            chrome_options.add_argument("--disable-extensions")
+            chrome_options.add_argument("--disable-plugins")
+            chrome_options.add_argument("--disable-images")
+            chrome_options.add_argument("--disable-javascript")
+            chrome_options.add_argument("--no-first-run")
+            
+            chrome_options.add_argument("--window-size=1280,720")
+            chrome_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
             
             # Cloud Run için binary path
             chrome_options.binary_location = "/usr/bin/google-chrome"
             
             driver = webdriver.Chrome(options=chrome_options)
+            driver.set_page_load_timeout(30)
             logger.info("✅ Chrome driver başlatıldı")
             return driver
         except Exception as e:
